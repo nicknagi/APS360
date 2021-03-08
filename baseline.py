@@ -7,20 +7,25 @@ import numpy as np
 import glob
 from tqdm import tqdm
 import multiprocessing as mp
-from sklearn.svm import LinearSVC, SVC
-# from thundersvm import SVC
+from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score
 import pickle
+
+'''
+* Script assumes data located in DATA_DIR already
+'''
 
 DATA_DIR = "aps360_project_db/DATASET"
 TRAIN_DATA_DIR = f"{DATA_DIR}/TRAIN"
 TEST_DATA_DIR = f"{DATA_DIR}/TEST"
-RELOAD_DATA = True
+
+# Option when set to True will load precomputed feature matrices from disk
+RELOAD_DATA = False
 
 
 def gen_features_for_img(image_path):
     img = Image.open(image_path)
-    img = img.resize((128, 128), Image.ANTIALIAS)
+    img = img.resize((50, 50), Image.ANTIALIAS)
     img = np.array(img)
 
     # Some images do not have color channels, normally these images can be ignored
@@ -28,7 +33,7 @@ def gen_features_for_img(image_path):
         return None
 
     grey_img = rgb2gray(img)
-    hog_features = hog(grey_img, block_norm="L2-Hys", pixels_per_cell=(8, 8))
+    hog_features = hog(grey_img, block_norm="L2-Hys", pixels_per_cell=(2, 2))
 
     color_features = img.flatten()
     flat_features = np.hstack((color_features, hog_features))
@@ -49,7 +54,7 @@ def generate_features_for_folder(folder_path):
 
     feature_matrix = np.array(final_results)
     feature_matrix = StandardScaler().fit_transform(feature_matrix)
-    feature_matrix = PCA(n_components=500).fit_transform(feature_matrix)
+    feature_matrix = PCA(n_components=50).fit_transform(feature_matrix)
     return feature_matrix
 
 
@@ -85,22 +90,24 @@ def run():
         testing_features = pickle.load(open("testing_features.pkl", "rb"))
         testing_labels = pickle.load(open("testing_labels.pkl", "rb"))
 
+    training_labels = list(map(lambda x: float(x), training_labels))
+    testing_labels = list(map(lambda x: float(x), testing_labels))
+    training_labels = np.array(training_labels)
+    testing_labels = np.array(testing_labels)
+
     print("Starting to train model")
-    # svc = LinearSVC(random_state=42, max_iter=10000, dual=False, fit_intercept=False, class_weight="balanced")
-    svc = SVC(random_state=42, class_weight="balanced", gamma="auto", verbose=True)
+    svc = SVC(random_state=42, class_weight="balanced", gamma=1/55000, verbose=True, C=0.4, degree=3)
     svc.fit(training_features, training_labels)
 
     pickle.dump(svc, open("svc.pkl", "wb"))
 
-    # training_labels = list(map(lambda x: float(x), training_labels))
     training_acc = svc.score(training_features, training_labels)
-    print(f"Done training model, with training accuracy {training_acc}")
+    print(f"\nDone training model, with training accuracy {int(training_acc*100)}%")
 
-    predicted_labels = svc.predict(testing_features)
-    # testing_labels = list(map(lambda x: float(x), testing_labels))
-    accuracy = accuracy_score(testing_labels, predicted_labels)
-
+    accuracy = svc.score(testing_features, testing_labels)
     print(f"Model accuracy is: {int(accuracy * 100)}%")
+
+    print(f"Naive model accuracy: {int(accuracy_score(testing_labels, np.array([1] * len(testing_labels))) * 100)}%")
 
 
 if __name__ == '__main__':
