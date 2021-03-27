@@ -561,7 +561,7 @@ def train(model_to_train, training_loader, val_loader, parameters, plot=False, s
 
 
 # -----------------------------------------------------------------------------------------------------
-params = {'batch': 64, 'epoch': 5, 'optim': 'ADAM', 'lr': 0.000285145, 'mm': 0.0, 'wd': 0, 'seed': 42}
+params = {'batch': 64, 'epoch': 1, 'optim': 'ADAM', 'lr': 0.000285145, 'mm': 0.0, 'wd': 0, 'seed': 42}
 
 # create train dataset
 train_dataset = create_dataset(training_data=True)
@@ -612,5 +612,6 @@ neg_ds, pos_ds, neg_dl, pos_dl = split_classes(test_loader, params["seed"], para
 print(f"Accuracy on Organic set: {test_accuracy(model, neg_dl)},\
      Accuracy on Recyclable set: {test_accuracy(model, pos_dl)}")
 
+plot_confusion_matrix(model, test_loader)
 # plot_confusion_matrix(model, neg_dl)
 # plot_confusion_matrix(model, pos_dl)
