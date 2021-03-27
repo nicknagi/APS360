@@ -288,13 +288,10 @@ class WasteClassifier(nn.Module):
         self.get_size = get_size
         self.conv = nn.Sequential(
             CNN(nin=3, nout=10),
-            nn.ReLU(),
             nn.MaxPool2d(2, 2),
             CNN(nin=10, nout=30),
-            nn.ReLU(),
             nn.MaxPool2d(2, 2),
             CNN(nin=30, nout=64),
-            nn.ReLU(),
             nn.MaxPool2d(2, 2)
         )
         self.flatten = nn.Flatten()
