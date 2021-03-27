@@ -15,8 +15,7 @@ import torchvision
 from torchvision import datasets, models, transforms
 
 import torch.utils.data
-from torch.utils.data import TensorDataset, DataLoader
-from torch.utils.data.sampler import SubsetRandomSampler
+from torch.utils.data import TensorDataset, DataLoader, Subset, SubsetRandomSampler
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,9 +28,13 @@ import pandas as pd
 from pandas import DataFrame
 import seaborn as sns
 
-torch.multiprocessing.set_sharing_strategy('file_system')
+from functools import partial
 
-"""## Setup GPU"""
+from ray import tune
+from ray.tune import CLIReporter
+from ray.tune.schedulers import ASHAScheduler
+
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 use_cuda = True
 device = torch.device('cuda' if torch.cuda.is_available() and use_cuda else 'cpu')
@@ -40,11 +43,9 @@ if device.type == 'cuda':
 else:
   print('CUDA is not available. Training on CPU')
 
-train_data_dir = "aps360_project_db/DATASET/TRAIN"
-test_data_dir = "aps360_project_db/DATASET/TEST"
+train_data_dir = "/home/nagianek/projects/aps360/aps360_project_db/DATASET/TRAIN"
+test_data_dir = "/home/nagianek/projects/aps360/aps360_project_db/DATASET/TEST"
 
-
-"""# 2. Split Data"""
 # Source: https://github.com/ufoym/imbalanced-dataset-sampler
 class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
     """Samples elements randomly from a given list of indices for imbalanced dataset
@@ -58,16 +59,14 @@ class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
                 
         # if indices is not provided, 
         # all elements in the dataset will be considered
-        self.indices = list(range(len(dataset))) \
-            if indices is None else indices
+        self.indices = list(range(len(dataset)))             if indices is None else indices
 
         # define custom callback
         self.callback_get_label = callback_get_label
 
         # if num_samples is not provided, 
         # draw `len(indices)` samples in each iteration
-        self.num_samples = len(self.indices) \
-            if num_samples is None else num_samples
+        self.num_samples = len(self.indices)             if num_samples is None else num_samples
             
         # distribution of classes in the dataset 
         label_to_count = {}
@@ -101,6 +100,7 @@ class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
 
     def __len__(self):
         return self.num_samples
+
 
 def create_dataset(train=True):
     """ Load data from file system and create a dataset
@@ -151,7 +151,7 @@ def split_data(dataset, train=True, train_ratio=0.7, batch_size=25,
 
     # dataloader parameters
     num_workers = multiprocessing.cpu_count()
-    prefetch_factor = 4
+    prefetch_factor = 8
     pin_mem = False
     if torch.cuda.is_available():
         pin_mem = True
@@ -162,7 +162,7 @@ def split_data(dataset, train=True, train_ratio=0.7, batch_size=25,
 
         # train/valid split
         train_idx, valid_idx = indices[:split], indices[split:]
-        train_sampler = torch.utils.data.Subset(dataset, train_idx)
+        train_sampler = Subset(dataset, train_idx)
         valid_sampler = SubsetRandomSampler(valid_idx)
 
         # create Data loaders
@@ -196,90 +196,6 @@ def split_data(dataset, train=True, train_ratio=0.7, batch_size=25,
         
         return test_loader
 
-def split_classes(dataloader, seed=1000, batch_size=25):
-    """ Splits data between 2 classes (organic and recyclable)
-    Args:
-        dataloader: dataloader of data to split
-        seed: random seed. Use same seed as when you split data (preferably)
-    Returns:
-        organic_dataset: organic data dataset
-        recycle_dataset: recyclable data dataset
-        organic_dataloader: organic data dataloader
-        recycle_dataloader: recyclable data dataloader
-    """
-    # set seed
-    torch.manual_seed(seed)
-    
-    # dataloader parameters
-    num_workers = 0
-    pin_mem = False
-    if torch.cuda.is_available():
-        pin_mem = True
-
-    organic_imgs = []
-    organic_labels = []
-    recyclable_imgs = []
-    recyclable_labels = []
-
-    # loop through data in dataloader and split into 2 classes
-    # organic == 0, recyclable == 1
-    for img_batch, label_batch in dataloader:
-        for j in range(len(label_batch)):
-            if label_batch[j] == 0:
-                organic_imgs.append(img_batch[j])
-                organic_labels.append(label_batch[j])
-            else:
-                recyclable_imgs.append(img_batch[j])
-                recyclable_labels.append(label_batch[j])
-
-    # convert to tensors
-    t_organic_imgs = torch.stack(organic_imgs)
-    t_organic_labels = torch.stack(organic_labels)
-    t_recyclable_imgs = torch.stack(recyclable_imgs)
-    t_recyclable_labels = torch.stack(recyclable_labels)
-
-    # free memory
-    organic_imgs = None
-    del organic_imgs
-    organic_labels = None
-    del organic_labels
-    recyclable_imgs = None
-    del recyclable_imgs
-    recyclable_labels = None
-    del recyclable_labels
-
-    # convert to Dataset objects
-    organic_dataset = TensorDataset(t_organic_imgs, t_organic_labels)
-    recycle_dataset = TensorDataset(t_recyclable_imgs, t_recyclable_labels)
-
-    # free memory
-    t_organic_imgs = None
-    del t_organic_imgs
-    t_organic_labels = None
-    del t_organic_labels
-    t_recyclable_imgs = None
-    del t_recyclable_imgs
-    t_recyclable_labels = None
-    del t_recyclable_labels
-
-    gc.collect()
-
-    # construct DataLoaders
-    organic_dataloader = DataLoader(organic_dataset, 
-                                    batch_size=batch_size,
-                                    num_workers=num_workers, 
-                                    pin_memory=pin_mem)
-    
-    recycle_dataloader = DataLoader(recycle_dataset,
-                                    batch_size=batch_size,
-                                    num_workers=num_workers, 
-                                    pin_memory=pin_mem)
-    
-    return organic_dataset, recycle_dataset, organic_dataloader, recycle_dataloader
-
-
-"""# 4. Define Model"""
-
 def get_num_params(net):
     """determine the size of the model
     Args:
@@ -289,7 +205,6 @@ def get_num_params(net):
     """
     return sum(p.numel() for p in net.parameters())
 
-# Base CNN model
 class CNN(nn.Module):
     def __init__(self, nin: int, nout: int, k=5, s=1):
         super(CNN, self).__init__()
@@ -322,11 +237,9 @@ class WasteClassifier(nn.Module):
             print("flattened layer size: ", x.size())
         x = self.fc(x)
         x = x.squeeze(1) # Flatten to [batch_size]
-        return x
+        return x 
 
 print(f"Number of parameters in model: {get_num_params(WasteClassifier())}")
-
-"""# 5. Training Code"""
 
 def save_model(model, filename=""):
     """ Save a model for inference for later use
@@ -350,7 +263,7 @@ def load_model(model, PATH, device):
     """
     model.load_state_dict(torch.load(PATH, map_location=device))
 
-def get_optimizer(model, params):
+def get_optimizer(model, config):
     """ Get an optimizer for your model
     Args:
         model: machine learning model
@@ -358,21 +271,21 @@ def get_optimizer(model, params):
     Returns:
         optimizer for model based on params
     """
-    
-    if params.get('optim') == 'RMS':
+
+    if config['optim'] == 'RMS':
         return optim.RMSprop(model.parameters(),
-                            lr=params.get('lr', 0.01), 
-                            momentum=params.get('mm', 0.0),
-                            weight_decay=params.get('wd', 0.0))
-    elif params.get('optim') == 'ADAM':
+                            lr=config["lr"],
+                            momentum=config["mm"],
+                            weight_decay=config["wd"])
+    elif config['optim'] == 'ADAM':
         return optim.Adam(model.parameters(), 
-                            lr=params.get('lr', 0.001),
-                            weight_decay=params.get('wd', 0.0))
+                            lr=config["lr"],
+                            weight_decay=config["wd"])
     else:
         return optim.SGD(model.parameters(), 
-                            lr=params.get('lr', 0.01), 
-                            momentum=params.get('mm', 0.0),
-                            weight_decay=params.get('wd', 0.0))
+                            lr=config["lr"],
+                            momentum=config["mm"],
+                            weight_decay=config["wd"])
         
 @torch.no_grad()
 def evaluate(model, val_loader, criterion):
@@ -410,38 +323,8 @@ def evaluate(model, val_loader, criterion):
     return acc, loss
 
 @torch.no_grad()
-def test_accuracy(model, test_loader):
-    """ Compute accuracy of the model on the test set
-     Args:
-        model: machine learning model
-        test_loader: dataloader for the test set
-     Returns:
-         acc: the accuracy of the model
-     """
-    total_acc = 0.0
-    total_examples = 0
-    for imgs, labels in test_loader:
-        # use GPU if available
-        imgs = imgs.to(device)
-        labels = labels.to(device)
-
-        # get predictions
-        out = model(imgs)
-
-        # converts to 0 (organic) or 1 (recyclable) and compares with label
-        pred = (out >= 0.0).squeeze().long() == labels 
-
-        # calculate accuracy
-        total_acc += sum(pred).item()
-        total_examples += len(labels)
-
-    acc = float(total_acc) / total_examples   
-    return acc
-
-@torch.no_grad()
 def plot_confusion_matrix(model, dataloader):
-    num_class = 2
-    confusion_matrix = np.zeros((num_class, num_class))
+    confusion_matrix = np.zeros((2, 2))
     
     for (imgs, labels) in dataloader:
         # use GPU if available
@@ -454,6 +337,7 @@ def plot_confusion_matrix(model, dataloader):
         for p, l in zip(pred, labels):
             confusion_matrix[p.long(), l.long()] += 1
 
+    # plot heatmap
     plt.figure(figsize=(9,6))
     classes = ['organic', 'recyclable']
     df = pd.DataFrame(confusion_matrix, index=classes, columns=classes).astype(int)
@@ -464,55 +348,53 @@ def plot_confusion_matrix(model, dataloader):
     plt.xlabel('Real label')
     plt.ylabel('Predicted label')
 
-def plot_loss_acc(num_epochs, train_loss, train_acc, val_loss, val_acc):
-    """ Plot training curves
-    Args:
-        num_epochs: number of epochs to plot
-        train_loss: list of training losses
-        train_acc: list of training accuracies
-        val_loss: list of validation losses
-        val_acc: list of validation accuracies
+    # calculate accuracy
+    TP = confusion_matrix[0][0]
+    TN = confusion_matrix[1][1]
+    acc = (TP + TN) / confusion_matrix.sum()
+    print(f"Accuracy: {acc:.8f}")
+
+def plot_trials(dfs):
+    """ Plot results of each trial in raytune
+        dfs: raytune trial_dataframes
     """
-    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(15,6))  
-    fig.subplots_adjust(wspace=0.4)
-
-    axes[0].set_title("Training & Validation Loss")
-    axes[0].plot(range(1,num_epochs+1), train_loss, label="Training")
-    axes[0].plot(range(1,num_epochs+1), val_loss, label="Validation")
-    axes[0].set_xlabel("Epochs")
-    axes[0].set_ylabel("Loss")
-    axes[0].legend(loc='best')
-
-    axes[1].set_title("Training & Validation Accuracy")
-    axes[1].plot(range(1,num_epochs+1), train_acc, label="Training")
-    axes[1].plot(range(1,num_epochs+1), val_acc, label="Validation")
-    axes[1].set_xlabel("Epochs")
-    axes[1].set_ylabel("Accuracy")
-    axes[1].legend(loc='best')
-
+    fig, ax = plt.subplots(nrows=1, ncols=1)  
+    for d in dfs.values():
+        acc = d.accuracy
+        ax.plot(np.arange(1, len(acc)+1), acc, marker='o', label=d['trial_id'][0])
+    ax.set_xlabel("Epochs")
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Accuracy per trial")
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
     plt.show()
 
-def train(model, train_loader, val_loader, params, plot=False, show_updates=False):
+def train(config, num_epochs=10, device=None, checkpoint_dir=None):
     """ Train the model and plot the learning curves
      Args:
-        model: machine learning model
-        train_loader: dataloader for the training set
-        val_loader: dataloader for the validation set
+        config: dictionary of hyperparameters to tune
         device: torch.device object. Either 'cpu' or 'cuda'
-        params: dictionary of hyperparameters for model
-        plot: flag to display training curves
-        show_updates: flag to display training updates each epoch
      """
 
-    num_epochs = params.get('epoch', 10)
-    criterion = nn.BCEWithLogitsLoss()   # expects targets to be of type torch.long
-    optimizer = get_optimizer(model, params)
+    # define model
+    model = WasteClassifier()
+    model.to(device)
+    criterion = nn.BCEWithLogitsLoss()  
+    optimizer = get_optimizer(model, config)
+    
+    if checkpoint_dir:
+        model_state, optimizer_state = torch.load(
+            os.path.join(checkpoint_dir, "checkpoint"))
+        model.load_state_dict(model_state)
+        optimizer.load_state_dict(optimizer_state)
+
+    # define dataloader
+    train_loader, val_loader = split_data(train_dataset, 
+                                    train=True, 
+                                    batch_size=config["batch_size"])
    
     train_acc, train_loss = np.zeros(num_epochs), np.zeros(num_epochs)
     val_acc, val_loss = np.zeros(num_epochs), np.zeros(num_epochs)
 
-    n = 0 # the number of iterations
-    start_time=time.time()
     for epoch in range(num_epochs):
         total_train_loss = 0.0
         total_train_acc = 0.0
@@ -523,12 +405,14 @@ def train(model, train_loader, val_loader, params, plot=False, show_updates=Fals
             imgs = imgs.to(device)
             labels = labels.to(device)
 
+            # zero the gradients
+            optimizer.zero_grad()
+
             # training
             out = model(imgs)
             loss = criterion(out, labels.float())
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
 
             # converts to 0 (organic) or 1 (recyclable) and compares with label
             pred = (out >= 0.0).squeeze().long() == labels 
@@ -542,73 +426,70 @@ def train(model, train_loader, val_loader, params, plot=False, show_updates=Fals
         train_loss[epoch] = float(total_train_loss) / (i+1)   
         val_acc[epoch], val_loss[epoch] = evaluate(model, val_loader, criterion)
         
-        # print updates each epoch
-        if show_updates:
-            print(f"Epoch {epoch + 1: <2} | "
-                    f"Train acc: {train_acc[epoch]:<12.8f} | "
-                    f"Train loss: {train_loss[epoch]:<12.8f} | "
-                    f"Val acc: {val_acc[epoch]:<12.8f} | "
-                    f"Val loss: {val_loss[epoch]:<12.8f}")
-            
-    # print final updates
-    if not show_updates:
-        print(f"Epoch {epoch + 1: <2} | "
-                f"Train acc: {train_acc[epoch]:<12.8f} | "
-                f"Train loss: {train_loss[epoch]:<12.8f} | "
-                f"Val acc: {val_acc[epoch]:<12.8f} | "
-                f"Val loss: {val_loss[epoch]:<12.8f}")
+        with tune.checkpoint_dir(epoch) as checkpoint_dir:
+            path = os.path.join(checkpoint_dir, "checkpoint")
+            torch.save((model.state_dict(), optimizer.state_dict()), path)
 
-    # time taken 
-    end_time = time.time()
-    print (f"Total time: {end_time-start_time: .2f}s")
-
-    if plot:
-        plot_loss_acc(num_epochs, train_loss, train_acc, val_loss, val_acc)
+        # report results to raytune
+        tune.report(loss=val_loss[epoch], accuracy=val_acc[epoch])
 
     return
 
-# -----------------------------------------------------------------------------------------------------
-params = {'batch':62, 'epoch':5, 'optim':'ADAM', 'lr':0.01, 'mm':0.0, 'wd':5e-3, 'seed':10}
+def run_test(num_samples=2, max_num_epochs=2, gpus_per_trial=1):
+    config = {
+        "lr": tune.loguniform(1e-4, 1e-1),
+        "batch_size": tune.choice([16, 32, 64]),
+        "optim": tune.choice(['ADAM', 'SGD']),
+        "mm": tune.choice([0.0]),
+        "wd": tune.choice([0, 5e-3]) 
+    }
 
-# create train dataset
+    scheduler = ASHAScheduler(
+        metric="loss",
+        mode="min",
+        max_t=max_num_epochs,
+        grace_period=1,
+        reduction_factor=2)
+    
+    reporter = CLIReporter(metric_columns=["loss", "accuracy", "training_iteration"])
+    
+    result = tune.run(
+        partial(train, num_epochs=max_num_epochs, device=device),
+        resources_per_trial={"gpu": gpus_per_trial},
+        config=config,
+        num_samples=num_samples,
+        scheduler=scheduler,
+        progress_reporter=reporter)
+
+    best_trial = result.get_best_trial("loss", "min", "last")
+    print(f'Best trial config: {best_trial.config}')
+    print(f'Best trial final validation loss: {best_trial.last_result["loss"]}')
+    print(f'Best trial final validation accuracy: {best_trial.last_result["accuracy"]}')
+
+    best_trained_model = WasteClassifier()
+    best_trained_model.to(device)
+
+    best_checkpoint_dir = best_trial.checkpoint.value
+    model_state, optimizer_state = torch.load(os.path.join(
+        best_checkpoint_dir, "checkpoint"))
+    best_trained_model.load_state_dict(model_state)
+
+    dfs = result.trial_dataframes
+    return dfs, best_trained_model
+
+
 train_dataset = create_dataset(train=True)
+dfs, best_trained_model = run_test(num_samples=20, max_num_epochs=10)
+
+plot_trials(dfs)
+
 test_dataset = create_dataset(train=False)
+test_loader = split_data(test_dataset, 
+                        train=False, 
+                        batch_size=32)
 
-test_loader = split_data(test_dataset,
-                        train=False,
-                        batch_size=params.get('batch'), 
-                        seed=params.get('seed'),
-                        shuffle=True)
-
-train_loader, valid_loader = split_data(train_dataset, 
-                                        train=True, 
-                                        train_ratio=0.7, 
-                                        batch_size=params.get('batch'), 
-                                        seed=params.get('seed'),
-                                        shuffle=True)
+plot_confusion_matrix(best_trained_model, test_loader)
 
 
-model = WasteClassifier()
-model.to(device)
-
-train(model, train_loader, valid_loader, params, plot=True, show_updates=True)
-
-plot_confusion_matrix(model, test_loader)
-print(f"Test Accuracy: {test_accuracy(model, test_loader):.8f}")
-
-"""
-Save a model to local file system
-"""
-# save_model(model)
-
-"""
-Load a saved model from local file system
-"""
-# new_model = WasteClassifier()
-# load_model(new_model, "/content/saved_models/58870", device)
-# new_model.to(device)
-
-# Test accuracy for false positives and negatives
-neg_ds, pos_ds, neg_dl, pos_dl = split_classes(test_loader, 10, 62)
-print(f"Accuracy on Organic set: {test_accuracy(model, neg_dl)},\
-     Accuracy on Recyclable set: {test_accuracy(model, pos_dl)}")
+file_name = "model_lr_0_001417_bs_16_opt_adam"
+save_model(best_trained_model, filename=file_name)
