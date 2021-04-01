@@ -266,7 +266,11 @@ def get_num_params(net):
     Returns:
         size of model
     """
-    return sum(p.numel() for p in net.parameters())
+    total_params = 0
+    for p in net.parameters():
+        if p.requires_grad:
+            total_params += p.numel()
+    return total_params
 
 
 # Base CNN model
@@ -286,21 +290,27 @@ class WasteClassifier(nn.Module):
     def __init__(self, get_size=False):
         super(WasteClassifier, self).__init__()
         self.get_size = get_size
+        self.resnet_feature_extractor = models.resnet18(pretrained=True)
+        self.resnet_feature_extractor = nn.Sequential(*list(self.resnet_feature_extractor.children())[:-3])
+        for param in self.resnet_feature_extractor.parameters():
+            param.requires_grad = False
+
         self.conv = nn.Sequential(
-            CNN(nin=3, nout=10),
+            CNN(nin=256, nout=512),
             nn.MaxPool2d(2, 2),
-            CNN(nin=10, nout=30),
-            nn.MaxPool2d(2, 2),
-            CNN(nin=30, nout=64),
-            nn.MaxPool2d(2, 2)
+            CNN(nin=512, nout=512),
+            nn.Dropout()
         )
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(
-            nn.Linear(36864, 64),
+            nn.Linear(512, 64),
             nn.ReLU(),
             nn.Linear(64, 1))
 
     def forward(self, x):
+        x = self.resnet_feature_extractor(x)
+        if self.get_size:
+            print("resnet feature layer size: ", x.size())
         x = self.conv(x)
         x = self.flatten(x)
         if self.get_size:
@@ -561,7 +571,7 @@ def train(model_to_train, training_loader, val_loader, parameters, plot=False, s
 
 
 # -----------------------------------------------------------------------------------------------------
-params = {'batch': 64, 'epoch': 1, 'optim': 'ADAM', 'lr': 0.000285145, 'mm': 0.0, 'wd': 0, 'seed': 42}
+params = {'batch': 64, 'epoch': 10, 'optim': 'ADAM', 'lr': 0.000285145, 'mm': 0.0, 'wd': 0, 'seed': 42}
 
 # create train dataset
 train_dataset = create_dataset(training_data=True)
@@ -590,10 +600,10 @@ model.to(device)
 # model.fc = nn.Linear(num_ftrs, 1)
 # model.to(device)
 
-print(f"Number of parameters in model: {get_num_params(model)}")
+print(f"Number of trainable parameters in model: {get_num_params(model)}")
 train(model, train_loader, valid_loader, params, plot=True, show_updates=True)
 
-print(f"Test Accuracy: {test_accuracy(model, test_loader):.8f}")
+# print(f"Test Accuracy: {test_accuracy(model, test_loader):.8f}")
 
 """
 Save a model to local file system
@@ -607,11 +617,7 @@ Load a saved model from local file system
 # load_model(new_model, "/content/saved_models/58870", device)
 # new_model.to(device)
 
-# Test accuracy for false positives and negatives
-neg_ds, pos_ds, neg_dl, pos_dl = split_classes(test_loader, params["seed"], params["batch"])
-print(f"Accuracy on Organic set: {test_accuracy(model, neg_dl)},\
-     Accuracy on Recyclable set: {test_accuracy(model, pos_dl)}")
-
 plot_confusion_matrix(model, test_loader)
+plot_confusion_matrix(model, valid_loader)
 # plot_confusion_matrix(model, neg_dl)
 # plot_confusion_matrix(model, pos_dl)

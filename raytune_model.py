@@ -219,25 +219,34 @@ class WasteClassifier(nn.Module):
     def __init__(self, get_size=False):
         super(WasteClassifier, self).__init__()
         self.get_size = get_size
+        self.resnet_feature_extractor = models.resnet18(pretrained=True)
+        self.resnet_feature_extractor = nn.Sequential(*list(self.resnet_feature_extractor.children())[:-3])
+        for param in self.resnet_feature_extractor.parameters():
+            param.requires_grad = False
+
         self.conv = nn.Sequential(
-            CNN(nin=3, nout=10),
+            CNN(nin=256, nout=512),
             nn.MaxPool2d(2, 2),
-            CNN(nin=10, nout=30),
-            nn.MaxPool2d(2, 2))
+            CNN(nin=512, nout=512),
+            nn.Dropout()
+        )
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(
-            nn.Linear(84270, 64),
+            nn.Linear(512, 64),
             nn.ReLU(),
             nn.Linear(64, 1))
 
     def forward(self, x):
-        x = self.conv(x) 
+        x = self.resnet_feature_extractor(x)
+        if self.get_size:
+            print("resnet feature layer size: ", x.size())
+        x = self.conv(x)
         x = self.flatten(x)
         if self.get_size:
             print("flattened layer size: ", x.size())
         x = self.fc(x)
-        x = x.squeeze(1) # Flatten to [batch_size]
-        return x 
+        x = x.squeeze(1)  # Flatten to [batch_size]
+        return x
 
 print(f"Number of parameters in model: {get_num_params(WasteClassifier())}")
 
@@ -437,11 +446,11 @@ def train(config, num_epochs=10, device=None, checkpoint_dir=None):
 
 def run_test(num_samples=2, max_num_epochs=2, gpus_per_trial=1):
     config = {
-        "lr": tune.loguniform(1e-4, 1e-1),
-        "batch_size": tune.choice([16, 32, 64]),
+        "lr": tune.loguniform(1e-4, 1),
+        "batch_size": tune.choice([16, 32, 64, 128]),
         "optim": tune.choice(['ADAM', 'SGD']),
         "mm": tune.choice([0.0]),
-        "wd": tune.choice([0, 5e-3]) 
+        "wd": tune.loguniform(1e-5, 5e-3)
     }
 
     scheduler = ASHAScheduler(
@@ -478,18 +487,27 @@ def run_test(num_samples=2, max_num_epochs=2, gpus_per_trial=1):
     return dfs, best_trained_model
 
 
-train_dataset = create_dataset(train=True)
-dfs, best_trained_model = run_test(num_samples=20, max_num_epochs=10)
+if __name__ == "__main__":
+    train_dataset = create_dataset(train=True)
+    dfs, best_trained_model = run_test(num_samples=10, max_num_epochs=10)
 
-plot_trials(dfs)
+    plot_trials(dfs)
 
-test_dataset = create_dataset(train=False)
-test_loader = split_data(test_dataset, 
-                        train=False, 
-                        batch_size=32)
+    # test_dataset = create_dataset(train=False)
+    # test_loader = split_data(test_dataset,
+    #                         train=False,
+    #                         batch_size=32)
 
-plot_confusion_matrix(best_trained_model, test_loader)
+    train_loader, valid_loader = split_data(train_dataset,
+                                            train=True,
+                                            train_ratio=0.7,
+                                            batch_size=32,
+                                            seed=42,
+                                            shuffle=True)
+
+    plot_confusion_matrix(best_trained_model, train_loader)
+    plot_confusion_matrix(best_trained_model, valid_loader)
 
 
-file_name = "model_lr_0_001417_bs_16_opt_adam"
-save_model(best_trained_model, filename=file_name)
+    file_name = "best_model"
+    save_model(best_trained_model, filename=file_name)
