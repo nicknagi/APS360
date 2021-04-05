@@ -12,4 +12,4 @@ Below is a list of files relevant to the work done on this project
 [Baseline Model](baseline.py)
 
 ## Simplified version of the project for Demo
-[Demo Notebook](DemoAPS360.ipnb)
+[Demo Notebook](DemoAPS360.ipynb)
