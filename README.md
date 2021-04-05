@@ -1,5 +1,5 @@
 # APS360 Project Repo - Waste Classification
-ML project to classify waste as either organic or recyclable
+ML project to classify waste as either organic or recyclable.  
 Below is a list of files relevant to the work done on this project
 
 ## Final version of the project notebook
