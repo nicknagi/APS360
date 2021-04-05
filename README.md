@@ -8,4 +8,4 @@ APS360 Project Repo
 [Raytune Notebook](APS360_Project_Raytune.ipynb)
 
 ## Baseline model file
-[Baseline Model]()
+[Baseline Model](baseline.py)
